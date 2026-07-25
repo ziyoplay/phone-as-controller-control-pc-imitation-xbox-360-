@@ -12,7 +12,6 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.drag
@@ -366,12 +365,18 @@ fun GamepadScreen(useAccel: Boolean, onToggleAccel: (Boolean) -> Unit, accelX: F
                                 val down = awaitFirstDown(requireUnconsumed = false)
                                 selectedId = w.id
                                 drag(down.id) { change ->
+                                    // Read positionChange() BEFORE consuming — once a change
+                                    // is marked consumed, positionChange() always reports
+                                    // Offset.Zero (by design, so nothing double-applies a
+                                    // delta someone else already consumed). Consuming first
+                                    // silently zeroed our own delta on every move.
+                                    val delta = change.positionChange()
                                     change.consume()
                                     val i = widgets.indexOfFirst { it.id == w.id }
                                     if (i != -1) {
                                         widgets[i] = widgets[i].copy(
-                                            xFrac = (widgets[i].xFrac + change.positionChange().x / areaWpx).coerceIn(0f, 0.94f),
-                                            yFrac = (widgets[i].yFrac + change.positionChange().y / areaHpx).coerceIn(0f, 0.90f)
+                                            xFrac = (widgets[i].xFrac + delta.x / areaWpx).coerceIn(0f, 0.94f),
+                                            yFrac = (widgets[i].yFrac + delta.y / areaHpx).coerceIn(0f, 0.90f)
                                         )
                                     }
                                 }
@@ -384,28 +389,27 @@ fun GamepadScreen(useAccel: Boolean, onToggleAccel: (Boolean) -> Unit, accelX: F
                         else Modifier
                     )
             ) {
-                Box {
-                    when (w.type) {
-                        "LSTICK" -> AnalogStick("L", dim) { x, y ->
-                            lx = ((x + 1f) * 127.5f).toInt().coerceIn(0, 255).toByte()
-                            ly = ((y + 1f) * 127.5f).toInt().coerceIn(0, 255).toByte()
-                        }
-                        "RSTICK" -> AnalogStick("R", dim) { x, y ->
-                            rx = ((x + 1f) * 127.5f).toInt().coerceIn(0, 255).toByte()
-                            ry = ((y + 1f) * 127.5f).toInt().coerceIn(0, 255).toByte()
-                        }
-                        "DPAD" -> DPad(dim) { mask, active -> press(mask, active) }
-                        "ACTIONS" -> FaceCluster(dim) { mask, active -> press(mask, active) }
-                        "BUMPER" -> ShoulderButton(w.label, metrics.bumperW, metrics.bumperH, trigger = false) { active -> press(w.bitmask, active) }
-                        "TRIGGER" -> ShoulderButton(w.label, metrics.bumperW, metrics.bumperH, trigger = true) { active ->
-                            val v = if (active) 255.toByte() else 0.toByte()
-                            if (w.label == "LT") ltv = v else rtv = v
-                        }
-                        "BUTTON" -> GenericButton(w.label, metrics.bumperW * 0.8f, metrics.bumperH) { active -> press(w.bitmask, active) }
+                // enabled = false while editing: otherwise each control's own live-play
+                // touch handling consumes drag moves before the Box above (which selects
+                // and repositions widgets) ever sees them.
+                val live = !isEditMode
+                when (w.type) {
+                    "LSTICK" -> AnalogStick("L", dim, live) { x, y ->
+                        lx = ((x + 1f) * 127.5f).toInt().coerceIn(0, 255).toByte()
+                        ly = ((y + 1f) * 127.5f).toInt().coerceIn(0, 255).toByte()
                     }
-                    if (isEditMode) {
-                        Box(modifier = Modifier.matchParentSize().background(Color.Transparent).clickable(enabled = false) {})
+                    "RSTICK" -> AnalogStick("R", dim, live) { x, y ->
+                        rx = ((x + 1f) * 127.5f).toInt().coerceIn(0, 255).toByte()
+                        ry = ((y + 1f) * 127.5f).toInt().coerceIn(0, 255).toByte()
                     }
+                    "DPAD" -> DPad(dim, live) { mask, active -> press(mask, active) }
+                    "ACTIONS" -> FaceCluster(dim, live) { mask, active -> press(mask, active) }
+                    "BUMPER" -> ShoulderButton(w.label, metrics.bumperW, metrics.bumperH, trigger = false, enabled = live) { active -> press(w.bitmask, active) }
+                    "TRIGGER" -> ShoulderButton(w.label, metrics.bumperW, metrics.bumperH, trigger = true, enabled = live) { active ->
+                        val v = if (active) 255.toByte() else 0.toByte()
+                        if (w.label == "LT") ltv = v else rtv = v
+                    }
+                    "BUTTON" -> GenericButton(w.label, metrics.bumperW * 0.8f, metrics.bumperH, live) { active -> press(w.bitmask, active) }
                 }
             }
         }

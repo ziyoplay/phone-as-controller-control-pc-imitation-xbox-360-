@@ -14,6 +14,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -41,9 +42,16 @@ import kotlin.math.atan2
 import kotlin.math.min
 import kotlin.math.roundToInt
 
-/** Reports press/release once per transition and fires a haptic tick on press. */
+/**
+ * Reports press/release once per transition and fires a haptic tick on press.
+ *
+ * `enabled = false` detaches the gesture entirely rather than just ignoring input —
+ * this control's own live-play touch handling must not compete with the layout
+ * editor's select/drag handler on the Box wrapping it in edit mode.
+ */
 @Composable
-private fun Modifier.pressable(onChange: (Boolean) -> Unit): Modifier {
+private fun Modifier.pressable(enabled: Boolean = true, onChange: (Boolean) -> Unit): Modifier {
+    if (!enabled) return this
     val haptic = LocalHapticFeedback.current
     return this.pointerInput(Unit) {
         awaitPointerEventScope {
@@ -64,36 +72,42 @@ private fun Modifier.pressable(onChange: (Boolean) -> Unit): Modifier {
 // Signature element: an arc on the rim traces the stick's angle, so direction is
 // readable in peripheral vision while the eyes stay on the monitor.
 @Composable
-fun AnalogStick(label: String, dim: Dp, onMove: (Float, Float) -> Unit) {
+fun AnalogStick(label: String, dim: Dp, enabled: Boolean = true, onMove: (Float, Float) -> Unit) {
     var offset by remember { mutableStateOf(Offset.Zero) }
     val density = LocalDensity.current
     val travel = with(density) { (dim * 0.26f).toPx() }
 
+    // enabled = false while the layout editor is open: this stick's own drag handling
+    // would otherwise consume every move and starve the editor's reposition-drag.
+    LaunchedEffect(enabled) { if (!enabled) { offset = Offset.Zero; onMove(0f, 0f) } }
+
     Box(
         modifier = Modifier
             .size(dim)
-            .pointerInput(Unit) {
-                awaitEachGesture {
-                    val down = awaitFirstDown()
-                    val mid = Offset(size.width / 2f, size.height / 2f)
+            .then(
+                if (enabled) Modifier.pointerInput(Unit) {
+                    awaitEachGesture {
+                        val down = awaitFirstDown()
+                        val mid = Offset(size.width / 2f, size.height / 2f)
 
-                    fun apply(p: Offset) {
-                        val d = p - mid
-                        val dist = d.getDistance()
-                        val clamped = if (dist <= travel) d else d * (travel / dist)
-                        offset = clamped
-                        onMove(clamped.x / travel, clamped.y / travel)
-                    }
+                        fun apply(p: Offset) {
+                            val d = p - mid
+                            val dist = d.getDistance()
+                            val clamped = if (dist <= travel) d else d * (travel / dist)
+                            offset = clamped
+                            onMove(clamped.x / travel, clamped.y / travel)
+                        }
 
-                    apply(down.position)
-                    drag(down.id) { change ->
-                        change.consume()
-                        apply(change.position)
+                        apply(down.position)
+                        drag(down.id) { change ->
+                            change.consume()
+                            apply(change.position)
+                        }
+                        offset = Offset.Zero
+                        onMove(0f, 0f)
                     }
-                    offset = Offset.Zero
-                    onMove(0f, 0f)
-                }
-            },
+                } else Modifier
+            ),
         contentAlignment = Alignment.Center
     ) {
         Canvas(modifier = Modifier.size(dim)) {
@@ -168,7 +182,7 @@ fun AnalogStick(label: String, dim: Dp, onMove: (Float, Float) -> Unit) {
 // ── D-pad ────────────────────────────────────────────────────────────────────
 // Xbox 360 disc: a round plate with the cross raised out of it.
 @Composable
-fun DPad(dim: Dp, onPress: (Int, Boolean) -> Unit) {
+fun DPad(dim: Dp, enabled: Boolean = true, onPress: (Int, Boolean) -> Unit) {
     val up = remember { mutableStateOf(false) }
     val down = remember { mutableStateOf(false) }
     val left = remember { mutableStateOf(false) }
@@ -246,38 +260,38 @@ fun DPad(dim: Dp, onPress: (Int, Boolean) -> Unit) {
                 .align(Alignment.TopCenter)
                 .width(armDp)
                 .height(armDp * 1.5f)
-                .pressable { up.value = it; onPress(BTN_DPAD_UP, it) })
+                .pressable(enabled) { up.value = it; onPress(BTN_DPAD_UP, it) })
         Box(
             Modifier
                 .align(Alignment.BottomCenter)
                 .width(armDp)
                 .height(armDp * 1.5f)
-                .pressable { down.value = it; onPress(BTN_DPAD_DOWN, it) })
+                .pressable(enabled) { down.value = it; onPress(BTN_DPAD_DOWN, it) })
         Box(
             Modifier
                 .align(Alignment.CenterStart)
                 .width(armDp * 1.5f)
                 .height(armDp)
-                .pressable { left.value = it; onPress(BTN_DPAD_LEFT, it) })
+                .pressable(enabled) { left.value = it; onPress(BTN_DPAD_LEFT, it) })
         Box(
             Modifier
                 .align(Alignment.CenterEnd)
                 .width(armDp * 1.5f)
                 .height(armDp)
-                .pressable { right.value = it; onPress(BTN_DPAD_RIGHT, it) })
+                .pressable(enabled) { right.value = it; onPress(BTN_DPAD_RIGHT, it) })
     }
 }
 
 // ── Face buttons ─────────────────────────────────────────────────────────────
 // Xbox 360 arrangement and colours: Y top, X left, B right, A bottom.
 @Composable
-fun FaceCluster(dim: Dp, onPress: (Int, Boolean) -> Unit) {
+fun FaceCluster(dim: Dp, enabled: Boolean = true, onPress: (Int, Boolean) -> Unit) {
     val d = dim * 0.40f
     Box(modifier = Modifier.size(dim)) {
-        FaceButton("Y", BtnY, d, Modifier.align(Alignment.TopCenter)) { onPress(BTN_Y, it) }
-        FaceButton("X", BtnX, d, Modifier.align(Alignment.CenterStart)) { onPress(BTN_X, it) }
-        FaceButton("B", BtnB, d, Modifier.align(Alignment.CenterEnd)) { onPress(BTN_B, it) }
-        FaceButton("A", BtnA, d, Modifier.align(Alignment.BottomCenter)) { onPress(BTN_A, it) }
+        FaceButton("Y", BtnY, d, enabled, Modifier.align(Alignment.TopCenter)) { onPress(BTN_Y, it) }
+        FaceButton("X", BtnX, d, enabled, Modifier.align(Alignment.CenterStart)) { onPress(BTN_X, it) }
+        FaceButton("B", BtnB, d, enabled, Modifier.align(Alignment.CenterEnd)) { onPress(BTN_B, it) }
+        FaceButton("A", BtnA, d, enabled, Modifier.align(Alignment.BottomCenter)) { onPress(BTN_A, it) }
     }
 }
 
@@ -286,6 +300,7 @@ private fun FaceButton(
     letter: String,
     color: Color,
     dim: Dp,
+    enabled: Boolean = true,
     modifier: Modifier = Modifier,
     onPress: (Boolean) -> Unit
 ) {
@@ -302,7 +317,7 @@ private fun FaceButton(
                     )
                 )
             )
-            .pressable { down = it; onPress(it) },
+            .pressable(enabled) { down = it; onPress(it) },
         contentAlignment = Alignment.Center
     ) {
         Text(
@@ -322,6 +337,7 @@ fun ShoulderButton(
     w: Dp,
     h: Dp,
     trigger: Boolean,
+    enabled: Boolean = true,
     onPress: (Boolean) -> Unit
 ) {
     var down by remember { mutableStateOf(false) }
@@ -336,7 +352,7 @@ fun ShoulderButton(
             .height(h)
             .clip(shape)
             .background(if (down) XGreen.copy(alpha = 0.22f) else Panel)
-            .pressable { down = it; onPress(it) },
+            .pressable(enabled) { down = it; onPress(it) },
         contentAlignment = Alignment.Center
     ) {
         Text(
@@ -388,6 +404,12 @@ fun GuideButton(dim: Dp, onTap: () -> Unit) {
 @Composable
 fun MenuButton(label: String, dim: Dp, onPress: (Boolean) -> Unit) {
     var down by remember { mutableStateOf(false) }
+    // "BACK"/"START" inside a small circle clipped by CircleShape: at the system's default
+    // font scale (dim.value * 0.30f).sp fits, but a larger accessibility text-scale setting
+    // inflates it past the circle, and the clip silently truncates it to "BAC"/"STA". Convert
+    // through Dp so the label's physical size stays constant regardless of font scale — this
+    // is a fixed-size instrument label, not scalable body text.
+    val fontSize = with(LocalDensity.current) { (dim.value * 0.30f).dp.toSp() }
     Box(
         modifier = Modifier
             .size(dim)
@@ -399,7 +421,7 @@ fun MenuButton(label: String, dim: Dp, onPress: (Boolean) -> Unit) {
         Text(
             text = label,
             color = if (down) XGreen else Muted,
-            fontSize = (dim.value * 0.30f).sp,
+            fontSize = fontSize,
             fontFamily = Mono,
             fontWeight = FontWeight.Bold
         )
@@ -408,7 +430,7 @@ fun MenuButton(label: String, dim: Dp, onPress: (Boolean) -> Unit) {
 
 /** Shared helper so custom buttons added in edit mode look like the built-ins. */
 @Composable
-fun GenericButton(label: String, w: Dp, h: Dp, onPress: (Boolean) -> Unit) {
+fun GenericButton(label: String, w: Dp, h: Dp, enabled: Boolean = true, onPress: (Boolean) -> Unit) {
     var down by remember { mutableStateOf(false) }
     Box(
         modifier = Modifier
@@ -416,7 +438,7 @@ fun GenericButton(label: String, w: Dp, h: Dp, onPress: (Boolean) -> Unit) {
             .height(h)
             .clip(RoundedCornerShape(h / 3))
             .background(if (down) XGreen.copy(alpha = 0.22f) else Panel)
-            .pressable { down = it; onPress(it) },
+            .pressable(enabled) { down = it; onPress(it) },
         contentAlignment = Alignment.Center
     ) {
         Text(
