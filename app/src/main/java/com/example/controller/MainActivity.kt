@@ -15,7 +15,6 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.drag
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
@@ -28,16 +27,18 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -50,29 +51,33 @@ import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
 import java.nio.ByteBuffer
-
-val PS_Blue = Color(0xFF00439C)
-val PS_Dark = Color(0xFF0A0A0A)
-val PS_Grey = Color(0xFF1E1E1E)
+import kotlin.math.roundToInt
 
 val Context.dataStore by preferencesDataStore(name = "controller_settings")
-val LAYOUT_KEY = stringPreferencesKey("gamepad_layout")
+val LAYOUT_KEY = stringPreferencesKey("gamepad_layout_v2")
 val IP_KEY = stringPreferencesKey("last_ip")
 
+/** Position is stored as a fraction of the play area so the layout never overlaps
+ *  regardless of the phone's screen size or aspect ratio. */
 data class Widget(
     val id: String,
-    var x: Float,
-    var y: Float,
+    var xFrac: Float,
+    var yFrac: Float,
     var scale: Float = 1.0f,
     var type: String,
     var label: String = "",
     var bitmask: Int = 0
 )
 
-val AllFunctions = mapOf(
-    "✕ (A)" to 0x0001, "◯ (B)" to 0x0002, "□ (X)" to 0x0008, "△ (Y)" to 0x0010,
-    "L1" to 0x0100, "R1" to 0x0200, "L2" to -1, "R2" to -2,
-    "L3" to 0x0040, "R3" to 0x0080, "SELECT" to 0x0020, "START" to 0x0010
+fun defaultWidgets() = listOf(
+    Widget("lstick", 0.04f, 0.20f, 1f, "LSTICK"),
+    Widget("dpad", 0.05f, 0.58f, 1f, "DPAD"),
+    Widget("actions", 0.79f, 0.20f, 1f, "ACTIONS"),
+    Widget("rstick", 0.80f, 0.60f, 1f, "RSTICK"),
+    Widget("lb", 0.02f, 0.02f, 1f, "BUMPER", "LB", BTN_LB),
+    Widget("lt", 0.15f, 0.02f, 1f, "TRIGGER", "LT"),
+    Widget("rb", 0.88f, 0.02f, 1f, "BUMPER", "RB", BTN_RB),
+    Widget("rt", 0.75f, 0.02f, 1f, "TRIGGER", "RT"),
 )
 
 class MainActivity : ComponentActivity(), SensorEventListener {
@@ -86,18 +91,32 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        WindowInsetsControllerCompat(window, window.decorView).let {
+            it.hide(WindowInsetsCompat.Type.systemBars())
+            it.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
+
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
 
         setContent {
-            MaterialTheme(colorScheme = darkColorScheme(primary = PS_Blue, background = PS_Dark)) {
+            MaterialTheme(
+                colorScheme = darkColorScheme(
+                    primary = XGreen,
+                    onPrimary = Chassis,
+                    background = Chassis,
+                    surface = Panel,
+                )
+            ) {
                 var ipInput by remember { mutableStateOf("") }
                 var isConnected by remember { mutableStateOf(false) }
                 val context = LocalContext.current
 
-                LaunchedEffect(Unit) { ipInput = context.dataStore.data.map { it[IP_KEY] }.first() ?: "26.64.105.1" }
+                LaunchedEffect(Unit) { ipInput = context.dataStore.data.map { it[IP_KEY] }.first() ?: "" }
 
-                Surface(modifier = Modifier.fillMaxSize(), color = PS_Dark) {
+                Surface(modifier = Modifier.fillMaxSize(), color = Chassis) {
                     if (!isConnected) {
                         SetupScreen(ipInput, onIpChange = { ipInput = it }) {
                             val cleanIp = ipInput.split(":")[0].trim()
@@ -107,13 +126,13 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                                     context.dataStore.edit { it[IP_KEY] = cleanIp }
                                     withContext(Dispatchers.Main) { controllerSocket = socket; isConnected = true }
                                 } catch (e: Exception) {
-                                    withContext(Dispatchers.Main) { Toast.makeText(context, "IP xato!", Toast.LENGTH_SHORT).show() }
+                                    withContext(Dispatchers.Main) { Toast.makeText(context, "Invalid address", Toast.LENGTH_SHORT).show() }
                                 }
                             }
                         }
                     } else {
-                        GamepadScreen(useAccel, { useAccel = it }, accelX, accelY) { b, lx, ly, rx, ry, l2, r2 ->
-                            controllerSocket?.sendInput(b, lx, ly, rx, ry, l2, r2)
+                        GamepadScreen(useAccel, { useAccel = it }, accelX, accelY) { b, lx, ly, rx, ry, lt, rt ->
+                            controllerSocket?.sendInput(b, lx, ly, rx, ry, lt, rt)
                         }
                     }
                 }
@@ -123,16 +142,12 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
     override fun onSensorChanged(event: SensorEvent?) {
         if (event != null && useAccel) {
-            // Landscape rejimida:
-            // Y o'qi (event.values[1]) - bu oldinga/orqaga egilish (L-Stick Y)
-            // X o'qi (event.values[0]) - bu chapga/o'ngga egilish (L-Stick X)
-            // Sensor qiymatlarini 0-255 oralig'iga moslashtiramiz (128 - o'rta holat)
-            
-            val rawX = -event.values[1] // Landscape-da Y o'qi gorizontal harakatga mos keladi
-            val rawY = -event.values[0] // Landscape-da X o'qi vertikal harakatga mos keladi
-            
-            accelX = (rawX * 12f) // Sezgirlik koeffitsienti
-            accelY = (rawY * 12f)
+            // Landscape: the sensor's Y axis is forward/back tilt (stick Y), X axis is
+            // left/right tilt (stick X).
+            val rawX = -event.values[1]
+            val rawY = -event.values[0]
+            accelX = rawX * 12f
+            accelY = rawY * 12f
         }
     }
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
@@ -140,15 +155,15 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     override fun onPause() { super.onPause(); sensorManager.unregisterListener(this) }
 }
 
-class ControllerSocket(serverIp: String, val port: Int = 5005) {
+class ControllerSocket(serverIp: String, val port: Int = UDP_PORT) {
     private val socket = DatagramSocket()
     private val address: InetAddress = InetAddress.getByName(serverIp)
     private val scope = CoroutineScope(Dispatchers.IO)
-    fun sendInput(buttons: Short, lx: Byte, ly: Byte, rx: Byte, ry: Byte, l2: Byte, r2: Byte) {
+    fun sendInput(buttons: Short, lx: Byte, ly: Byte, rx: Byte, ry: Byte, lt: Byte, rt: Byte) {
         scope.launch {
             try {
                 val buffer = ByteBuffer.allocate(8)
-                buffer.putShort(buttons); buffer.put(lx); buffer.put(ly); buffer.put(rx); buffer.put(ry); buffer.put(l2); buffer.put(r2)
+                buffer.putShort(buttons); buffer.put(lx); buffer.put(ly); buffer.put(rx); buffer.put(ry); buffer.put(lt); buffer.put(rt)
                 socket.send(DatagramPacket(buffer.array(), 8, address, port))
             } catch (e: Exception) {}
         }
@@ -158,11 +173,37 @@ class ControllerSocket(serverIp: String, val port: Int = 5005) {
 @Composable
 fun SetupScreen(ip: String, onIpChange: (String) -> Unit, onConnect: () -> Unit) {
     Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
-        Text("Gamepad Pro Builder", fontSize = 28.sp, fontWeight = FontWeight.Bold, color = Color.White)
+        Box(
+            modifier = Modifier.size(64.dp).clip(CircleShape).background(Panel).border(2.dp, Edge, CircleShape),
+            contentAlignment = Alignment.Center
+        ) { GuideButton(56.dp) {} }
+        Spacer(modifier = Modifier.height(20.dp))
+        Text("GAMEPAD PRO BUILDER", fontSize = 24.sp, fontWeight = FontWeight.Black, color = Ink, letterSpacing = 2.sp, fontFamily = Mono)
+        Text("XBOX 360 EMULATION OVER UDP", fontSize = 12.sp, color = Muted, letterSpacing = 3.sp, fontFamily = Mono)
+        Spacer(modifier = Modifier.height(32.dp))
+        Text("PC IP ADDRESS", fontSize = 11.sp, color = Muted, letterSpacing = 2.sp, fontFamily = Mono, modifier = Modifier.width(280.dp))
+        Spacer(modifier = Modifier.height(6.dp))
+        OutlinedTextField(
+            value = ip,
+            onValueChange = onIpChange,
+            placeholder = { Text("192.168.1.42", color = Muted.copy(alpha = 0.5f), fontFamily = Mono) },
+            textStyle = androidx.compose.ui.text.TextStyle(fontFamily = Mono, fontSize = 18.sp, color = Ink),
+            singleLine = true,
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedBorderColor = XGreen,
+                unfocusedBorderColor = Edge,
+                focusedContainerColor = Recess,
+                unfocusedContainerColor = Recess,
+            ),
+            modifier = Modifier.width(280.dp)
+        )
         Spacer(modifier = Modifier.height(24.dp))
-        OutlinedTextField(value = ip, onValueChange = onIpChange, label = { Text("PC IP") }, modifier = Modifier.width(280.dp))
-        Spacer(modifier = Modifier.height(24.dp))
-        Button(onClick = onConnect, modifier = Modifier.width(180.dp)) { Text("CONNECT") }
+        Button(
+            onClick = onConnect,
+            enabled = ip.isNotBlank(),
+            colors = ButtonDefaults.buttonColors(containerColor = XGreen, contentColor = Chassis, disabledContainerColor = Edge),
+            modifier = Modifier.width(200.dp).height(48.dp)
+        ) { Text("CONNECT", fontFamily = Mono, fontWeight = FontWeight.Bold, letterSpacing = 2.sp) }
     }
 }
 
@@ -171,8 +212,7 @@ fun GamepadScreen(useAccel: Boolean, onToggleAccel: (Boolean) -> Unit, accelX: F
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val gson = Gson()
-    val density = LocalDensity.current
-    
+
     var isEditMode by remember { mutableStateOf(false) }
     var selectedId by remember { mutableStateOf<String?>(null) }
     val widgets = remember { mutableStateListOf<Widget>() }
@@ -183,16 +223,7 @@ fun GamepadScreen(useAccel: Boolean, onToggleAccel: (Boolean) -> Unit, accelX: F
             val list: List<Widget> = gson.fromJson(savedJson, object : TypeToken<List<Widget>>() {}.type)
             widgets.clear(); widgets.addAll(list)
         } else {
-            widgets.addAll(listOf(
-                Widget("lstick", 60f, 150f, 1.0f, "LSTICK"),
-                Widget("rstick", 500f, 150f, 1.0f, "RSTICK"),
-                Widget("dpad", 60f, 20f, 1.0f, "DPAD"),
-                Widget("actions", 500f, 20f, 1.0f, "ACTIONS"),
-                Widget("l1", 30f, 5f, 1.0f, "BUTTON", "L1", 0x0100),
-                Widget("r1", 620f, 5f, 1.0f, "BUTTON", "R1", 0x0200),
-                Widget("l2", 150f, 5f, 1.0f, "TRIGGER", "L2"),
-                Widget("r2", 500f, 5f, 1.0f, "TRIGGER", "R2")
-            ))
+            widgets.addAll(defaultWidgets())
         }
     }
 
@@ -201,165 +232,177 @@ fun GamepadScreen(useAccel: Boolean, onToggleAccel: (Boolean) -> Unit, accelX: F
     var ly by remember { mutableStateOf<Byte>(128.toByte()) }
     var rx by remember { mutableStateOf<Byte>(128.toByte()) }
     var ry by remember { mutableStateOf<Byte>(128.toByte()) }
-    var l2v by remember { mutableStateOf<Byte>(0) }
-    var r2v by remember { mutableStateOf<Byte>(0) }
+    var ltv by remember { mutableStateOf<Byte>(0) }
+    var rtv by remember { mutableStateOf<Byte>(0) }
 
-    LaunchedEffect(useAccel, accelX, accelY, lx, ly, rx, ry, buttons, l2v, r2v) {
+    fun press(mask: Int, active: Boolean) {
+        buttons = if (active) (buttons.toInt() or mask).toShort() else (buttons.toInt() and mask.inv()).toShort()
+    }
+
+    LaunchedEffect(useAccel, accelX, accelY, lx, ly, rx, ry, buttons, ltv, rtv) {
         while (true) {
             val finalLx = if (useAccel) (128f + accelX).toInt().coerceIn(0, 255).toByte() else lx
             val finalLy = if (useAccel) (128f + accelY).toInt().coerceIn(0, 255).toByte() else ly
-            onInput(buttons, finalLx, finalLy, rx, ry, l2v, r2v)
+            onInput(buttons, finalLx, finalLy, rx, ry, ltv, rtv)
             delay(15)
         }
     }
 
-    Box(modifier = Modifier.fillMaxSize()) {
+    BoxWithConstraints(modifier = Modifier.fillMaxSize().background(Chassis)) {
+        val density = LocalDensity.current
+        val areaWpx = with(density) { maxWidth.toPx() }
+        val areaHpx = with(density) { maxHeight.toPx() }
+        val metrics = remember(maxWidth, maxHeight) { Metrics.of(maxWidth, maxHeight) }
+
+        fun dimFor(type: String) = when (type) {
+            "LSTICK", "RSTICK" -> metrics.stick
+            "DPAD" -> metrics.dpad
+            "ACTIONS" -> metrics.cluster
+            "BUMPER", "TRIGGER" -> metrics.bumperW
+            else -> metrics.bumperW
+        }
+
         if (isEditMode) {
-            Surface(modifier = Modifier.fillMaxWidth().height(90.dp).align(Alignment.TopCenter), color = Color.Black.copy(0.9f)) {
-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(8.dp)) {
+            // Narrow and centred so it never reaches the LB/LT/RT/RB corners — those stay
+            // selectable while editing instead of being hidden under a full-width bar.
+            Surface(
+                modifier = Modifier.align(Alignment.TopCenter).padding(top = 8.dp).fillMaxWidth(0.44f),
+                color = Panel.copy(0.97f),
+                shape = RoundedCornerShape(18.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, Edge)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
                     val sel = widgets.find { it.id == selectedId }
                     if (sel != null) {
-                        Column(modifier = Modifier.width(120.dp)) {
-                            Text("Scale: ${(sel.scale*100).toInt()}%", color = Color.White, fontSize = 9.sp)
-                            Slider(value = sel.scale, onValueChange = { s -> val i = widgets.indexOf(sel); if(i!=-1) widgets[i] = sel.copy(scale = s) }, valueRange = 0.5f..2.5f)
+                        Column(modifier = Modifier.width(130.dp)) {
+                            Text("SCALE ${(sel.scale * 100).toInt()}%", color = Muted, fontSize = 10.sp, fontFamily = Mono, letterSpacing = 1.sp)
+                            Slider(
+                                value = sel.scale,
+                                onValueChange = { s -> val i = widgets.indexOf(sel); if (i != -1) widgets[i] = sel.copy(scale = s) },
+                                valueRange = 0.6f..1.8f,
+                                colors = SliderDefaults.colors(thumbColor = XGreen, activeTrackColor = XGreen, inactiveTrackColor = Edge)
+                            )
                         }
-                        if (sel.type == "BUTTON" || sel.type == "TRIGGER") {
+                        Spacer(Modifier.width(12.dp))
+                        if (sel.type == "BUTTON") {
                             var expanded by remember { mutableStateOf(false) }
                             Box {
-                                TextButton(onClick = { expanded = true }) { Text(sel.label, color = Color.Cyan) }
+                                TextButton(onClick = { expanded = true }) {
+                                    Text(sel.label, color = XGreen, fontFamily = Mono, fontWeight = FontWeight.Bold)
+                                }
                                 DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                                    AllFunctions.forEach { (name, mask) ->
-                                        DropdownMenuItem(text = { Text(name) }, onClick = {
-                                            val i = widgets.indexOf(sel); if (i != -1) widgets[i] = sel.copy(label = name.split(" ")[0], bitmask = if(mask<0) 0 else mask, type = if(mask<0) "TRIGGER" else "BUTTON")
+                                    AssignableButtons.forEach { (name, mask) ->
+                                        DropdownMenuItem(text = { Text(name, fontFamily = Mono) }, onClick = {
+                                            val i = widgets.indexOf(sel)
+                                            if (i != -1) widgets[i] = sel.copy(label = name, bitmask = mask)
                                             expanded = false
                                         })
                                     }
                                 }
                             }
+                        } else {
+                            Text(sel.label.ifEmpty { sel.type }, color = Muted, fontFamily = Mono, fontSize = 12.sp, letterSpacing = 1.sp)
                         }
-                        IconButton(onClick = { widgets.remove(sel); selectedId = null }) { Icon(Icons.Default.Delete, null, tint = Color.Red) }
+                        Spacer(Modifier.weight(1f))
+                        IconButton(onClick = { widgets.remove(sel); selectedId = null }) { Icon(Icons.Default.Delete, null, tint = BtnB) }
+                    } else {
+                        Text("TAP A CONTROL TO EDIT IT", color = Muted, fontFamily = Mono, fontSize = 12.sp, letterSpacing = 1.sp, modifier = Modifier.weight(1f))
                     }
-                    Spacer(Modifier.weight(1f))
-                    IconButton(onClick = { widgets.add(Widget("btn_${System.currentTimeMillis()}", 350f, 150f, 1f, "BUTTON", "NEW", 0x0001)) }) { Icon(Icons.Default.Add, null, tint = Color.Green) }
-                    Button(onClick = { isEditMode = false; selectedId = null; scope.launch { context.dataStore.edit { it[LAYOUT_KEY] = gson.toJson(widgets.toList()) } } }) { Text("SAVE") }
+                    IconButton(onClick = {
+                        widgets.add(Widget("btn_${widgets.size}_${selectedId.hashCode()}", 0.46f, 0.40f, 1f, "BUTTON", "A", BTN_A))
+                    }) { Icon(Icons.Default.Add, null, tint = XGreen) }
+                    Button(
+                        onClick = { isEditMode = false; selectedId = null; scope.launch { context.dataStore.edit { it[LAYOUT_KEY] = gson.toJson(widgets.toList()) } } },
+                        colors = ButtonDefaults.buttonColors(containerColor = XGreen, contentColor = Chassis)
+                    ) { Text("SAVE", fontFamily = Mono, fontWeight = FontWeight.Bold) }
                 }
             }
         } else {
-            Row(modifier = Modifier.align(Alignment.TopCenter).padding(10.dp)) {
-                IconButton(onClick = { isEditMode = true }, modifier = Modifier.background(PS_Blue, CircleShape)) { Icon(Icons.Default.Settings, null, tint = Color.White) }
-                Spacer(Modifier.width(16.dp))
-                IconButton(onClick = { onToggleAccel(!useAccel) }, modifier = Modifier.background(if (useAccel) Color.Green else Color.Gray, CircleShape)) { Icon(Icons.Default.LocationOn, null, tint = Color.White) }
+            Row(
+                modifier = Modifier.align(Alignment.TopCenter).padding(top = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                MenuButton("BACK", 40.dp) { active -> press(BTN_BACK, active) }
+                GuideButton(52.dp) { isEditMode = true }
+                MenuButton("START", 40.dp) { active -> press(BTN_START, active) }
+            }
+            Row(
+                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text("MOTION", color = if (useAccel) XGreen else Muted, fontFamily = Mono, fontSize = 11.sp, letterSpacing = 2.sp)
+                IconButton(
+                    onClick = { onToggleAccel(!useAccel) },
+                    modifier = Modifier.size(36.dp)
+                        .background(if (useAccel) XGreenDim else Panel, CircleShape)
+                        .border(1.dp, if (useAccel) XGreen else Edge, CircleShape)
+                ) { Icon(Icons.Default.LocationOn, null, tint = if (useAccel) XGreen else Muted, modifier = Modifier.size(18.dp)) }
             }
         }
 
         widgets.forEach { w ->
+            val dim = dimFor(w.type)
+            val xPx = w.xFrac * areaWpx
+            val yPx = w.yFrac * areaHpx
+
             Box(
-                modifier = Modifier.offset { with(density) { IntOffset(w.x.dp.roundToPx(), w.y.dp.roundToPx()) } }.scale(w.scale)
-                    .pointerInput(w.id, isEditMode) {
+                modifier = Modifier
+                    .offset { IntOffset(xPx.roundToInt(), yPx.roundToInt()) }
+                    .scale(w.scale)
+                    .pointerInput(w.id, isEditMode, areaWpx, areaHpx) {
                         if (isEditMode) {
-                            detectDragGestures(onDragStart = { selectedId = w.id }, onDrag = { change, dragAmount ->
-                                change.consume()
-                                val i = widgets.indexOfFirst { it.id == w.id }
-                                if (i != -1) { widgets[i] = widgets[i].copy(x = widgets[i].x + dragAmount.x / density.density, y = widgets[i].y + dragAmount.y / density.density) }
-                            })
+                            awaitEachGesture {
+                                // Select as soon as the finger lands — not requireUnconsumed,
+                                // since a control's own press feedback (e.g. GenericButton)
+                                // observes the same down without consuming it. A plain tap
+                                // then just selects; any following movement also repositions.
+                                val down = awaitFirstDown(requireUnconsumed = false)
+                                selectedId = w.id
+                                drag(down.id) { change ->
+                                    change.consume()
+                                    val i = widgets.indexOfFirst { it.id == w.id }
+                                    if (i != -1) {
+                                        widgets[i] = widgets[i].copy(
+                                            xFrac = (widgets[i].xFrac + change.positionChange().x / areaWpx).coerceIn(0f, 0.94f),
+                                            yFrac = (widgets[i].yFrac + change.positionChange().y / areaHpx).coerceIn(0f, 0.90f)
+                                        )
+                                    }
+                                }
+                            }
                         }
                     }
-                    .then(if(isEditMode) Modifier.border(if(selectedId == w.id) 2.dp else 1.dp, if(selectedId == w.id) Color.Cyan else Color.White.copy(0.3f), RoundedCornerShape(8.dp)).clickable { selectedId = w.id } else Modifier)
+                    .then(
+                        if (isEditMode) Modifier
+                            .border(if (selectedId == w.id) 2.dp else 1.dp, if (selectedId == w.id) XGreen else Edge, RoundedCornerShape(12.dp))
+                        else Modifier
+                    )
             ) {
-                // Tahrirlash rejimida tugmalarni bloklash uchun shaffof qatlam
                 Box {
                     when (w.type) {
-                        "LSTICK", "RSTICK" -> Stick(if(w.type=="LSTICK") "L" else "R") { x, y -> 
-                            if(w.type=="LSTICK") { lx = ((x + 1f) * 127.5f).toInt().coerceIn(0, 255).toByte(); ly = ((y + 1f) * 127.5f).toInt().coerceIn(0, 255).toByte() }
-                            else { rx = ((x + 1f) * 127.5f).toInt().coerceIn(0, 255).toByte(); ry = ((y + 1f) * 127.5f).toInt().coerceIn(0, 255).toByte() }
+                        "LSTICK" -> AnalogStick("L", dim) { x, y ->
+                            lx = ((x + 1f) * 127.5f).toInt().coerceIn(0, 255).toByte()
+                            ly = ((y + 1f) * 127.5f).toInt().coerceIn(0, 255).toByte()
                         }
-                        "DPAD" -> DPadLayout { mask, active -> buttons = if (active) (buttons.toInt() or mask).toShort() else (buttons.toInt() and mask.inv()).toShort() }
-                        "ACTIONS" -> ActionLayout { mask, active -> buttons = if (active) (buttons.toInt() or mask).toShort() else (buttons.toInt() and mask.inv()).toShort() }
-                        "BUTTON" -> GenericButton(w.label, false) { active -> buttons = if (active) (buttons.toInt() or w.bitmask).toShort() else (buttons.toInt() and w.bitmask.inv()).toShort() }
-                        "TRIGGER" -> GenericButton(w.label, true) { active -> val v = if (active) 255.toByte() else 0.toByte(); if (w.label == "L2") l2v = v else if (w.label == "R2") r2v = v }
+                        "RSTICK" -> AnalogStick("R", dim) { x, y ->
+                            rx = ((x + 1f) * 127.5f).toInt().coerceIn(0, 255).toByte()
+                            ry = ((y + 1f) * 127.5f).toInt().coerceIn(0, 255).toByte()
+                        }
+                        "DPAD" -> DPad(dim) { mask, active -> press(mask, active) }
+                        "ACTIONS" -> FaceCluster(dim) { mask, active -> press(mask, active) }
+                        "BUMPER" -> ShoulderButton(w.label, metrics.bumperW, metrics.bumperH, trigger = false) { active -> press(w.bitmask, active) }
+                        "TRIGGER" -> ShoulderButton(w.label, metrics.bumperW, metrics.bumperH, trigger = true) { active ->
+                            val v = if (active) 255.toByte() else 0.toByte()
+                            if (w.label == "LT") ltv = v else rtv = v
+                        }
+                        "BUTTON" -> GenericButton(w.label, metrics.bumperW * 0.8f, metrics.bumperH) { active -> press(w.bitmask, active) }
                     }
                     if (isEditMode) {
-                        // Edit rejimida tugma ustini yopib, barcha bosishlarni blocklaydi
                         Box(modifier = Modifier.matchParentSize().background(Color.Transparent).clickable(enabled = false) {})
                     }
                 }
             }
         }
-    }
-}
-
-@Composable
-fun Stick(label: String, onMove: (Float, Float) -> Unit) {
-    var offset by remember { mutableStateOf(Offset.Zero) }
-    val density = LocalDensity.current
-    val radiusPx = with(density) { 50.dp.toPx() } // Stickning maksimal harakatlanish radiusi
-
-    Box(modifier = Modifier.size(120.dp).background(PS_Grey.copy(0.4f), CircleShape).border(2.dp, Color.Gray, CircleShape)
-        .pointerInput(Unit) {
-            awaitEachGesture {
-                val down = awaitFirstDown()
-                val center = Offset(size.width / 2f, size.height / 2f)
-
-                fun handleInput(pointerPos: Offset) {
-                    val delta = pointerPos - center
-                    val distance = delta.getDistance()
-                    val clampedDelta = if (distance <= radiusPx) delta else delta * (radiusPx / distance)
-                    offset = clampedDelta
-                    onMove(clampedDelta.x / radiusPx, clampedDelta.y / radiusPx)
-                }
-
-                handleInput(down.position)
-
-                drag(down.id) { change ->
-                    change.consume()
-                    handleInput(change.position)
-                }
-
-                // Barmoq ko'tarilganda o'rtaga qaytish
-                offset = Offset.Zero
-                onMove(0f, 0f)
-            }
-        }, contentAlignment = Alignment.Center) {
-    Text(label, color = Color.Gray, fontSize = 24.sp, fontWeight = FontWeight.Black)
-    Box(modifier = Modifier.offset { IntOffset(offset.x.toInt(), offset.y.toInt()) }.size(55.dp).clip(CircleShape).background(Brush.radialGradient(listOf(Color.Gray, Color.Black))))
-}
-}
-
-@Composable
-fun DPadLayout(onPress: (Int, Boolean) -> Unit) {
-    Box(modifier = Modifier.size(150.dp)) {
-        val aligns = listOf(Alignment.TopCenter, Alignment.BottomCenter, Alignment.CenterStart, Alignment.CenterEnd)
-        val masks = listOf(0x1000, 0x2000, 0x4000, 0x8000)
-        for(i in 0..3) {
-            var isP by remember { mutableStateOf(false) }
-            Box(modifier = Modifier.align(aligns[i]).size(45.dp).background(if(isP) PS_Blue else PS_Grey, RoundedCornerShape(8.dp)).pointerInput(Unit) {
-                awaitPointerEventScope { while(true) { val p = awaitPointerEvent().changes.first().pressed; if(isP != p){isP=p; onPress(masks[i], p)} } }
-            })
-        }
-    }
-}
-
-@Composable
-fun ActionLayout(onPress: (Int, Boolean) -> Unit) {
-    val colors = listOf(Color(0xFF388E3C), Color(0xFFC2185B), Color(0xFFD32F2F), Color(0xFF2E6DB4))
-    val masks = listOf(0x0010, 0x0008, 0x0002, 0x0001)
-    Box(modifier = Modifier.size(160.dp)) {
-        val aligns = listOf(Alignment.TopCenter, Alignment.CenterStart, Alignment.CenterEnd, Alignment.BottomCenter)
-        for(i in 0..3) {
-            var isP by remember { mutableStateOf(false) }
-            Box(modifier = Modifier.align(aligns[i]).size(50.dp).clip(CircleShape).background(if(isP) colors[i].copy(0.4f) else PS_Grey).border(2.dp, colors[i], CircleShape).pointerInput(Unit) {
-                awaitPointerEventScope { while(true){ val p = awaitPointerEvent().changes.first().pressed; if(isP!=p){isP=p; onPress(masks[i], p)} } }
-            })
-        }
-    }
-}
-
-@Composable
-fun GenericButton(text: String, isTrigger: Boolean, onTouch: (Boolean) -> Unit) {
-    var isP by remember { mutableStateOf(false) }
-    Box(modifier = Modifier.width(if(isTrigger) 110.dp else 90.dp).height(45.dp).clip(RoundedCornerShape(10.dp))
-        .background(if(isP) (if(isTrigger) Color.Red else Color.Gray) else PS_Grey).border(1.dp, Color.DarkGray, RoundedCornerShape(10.dp))
-        .pointerInput(Unit) { awaitPointerEventScope { while(true){ val p = awaitPointerEvent().changes.first().pressed; if(isP!=p){isP=p; onTouch(p)} } } }, contentAlignment = Alignment.Center) { 
-        Text(text, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
     }
 }

@@ -10,6 +10,11 @@ button and stick state over UDP; a small Python server on the PC feeds that stat
 the ViGEmBus driver, which exposes a real Xbox 360 controller to Windows. Games see an
 ordinary gamepad — no per-game configuration needed.
 
+<p align="center">
+  <img src="docs/screenshot-setup.png" width="49%" alt="Connect screen" />
+  <img src="docs/screenshot-gamepad.png" width="49%" alt="Gamepad screen" />
+</p>
+
 ## Components
 
 | Part | Location | Role |
@@ -19,10 +24,15 @@ ordinary gamepad — no per-game configuration needed.
 
 ## Features
 
-- **Customizable layout** — drag widgets around, resize them, add or delete buttons in Edit mode
+- **Xbox 360 layout and vocabulary** — A/B/X/Y, LB/RB, LT/RT, Back/Start, all named and
+  mapped the way the emulated controller actually reports them
+- **Customizable layout** — drag any control to reposition it, tap one to select it, then
+  resize, reassign, or delete it in Edit mode; **+** adds an extra button
 - **Persistent settings** — layout and last-used IP are saved with DataStore
-- Two analog sticks, D-Pad, action buttons, L1/R1 and digital L2/R2 triggers
+- Two analog sticks (with an angle indicator on the rim), D-Pad, four face buttons,
+  shoulder buttons, digital LT/RT triggers, Back/Guide/Start
 - **Motion mode** — tilt the phone to drive the left stick (accelerometer)
+- Immersive fullscreen — the status and navigation bars are hidden during play
 - State is sent every 15 ms (~66 Hz)
 
 ## Requirements
@@ -87,53 +97,60 @@ server console.
 
 On the gamepad screen:
 
-- ⚙️ **Settings icon** — enter Edit mode. Drag widgets to move them, tap one to select it,
-  then use the slider to resize, the dropdown to reassign its function, or 🗑 to delete it.
-  ➕ adds a new button. **SAVE** stores the layout and exits Edit mode.
-- 📍 **Location icon** — toggle motion mode (green = on). The left stick is then driven by
-  tilting the phone.
+- **Ring-of-light (Guide) button**, top centre — tap it to enter Edit mode. Tap any control
+  to select it (a green outline appears), then use the slider to resize it, the dropdown to
+  reassign what it sends, or 🗑 to delete it. **+** adds a new button. **SAVE** stores the
+  layout and exits Edit mode. Back, Start, and the analog sticks/D-Pad/face buttons keep
+  their fixed function; only extra buttons you add are reassignable.
+- **MOTION toggle**, bottom centre — turns on motion mode (green = on). The left stick is
+  then driven by tilting the phone instead of by touch.
 
 ## Protocol
 
 Each packet is 8 bytes, big-endian, struct format `>HBBBBBB`:
 
 ```
-[buttons: uint16][LX][LY][RX][RY][L2][R2]
+[buttons: uint16][LX][LY][RX][RY][LT][RT]
 ```
 
-Stick and trigger bytes are `0..255` with `128` as the neutral center. Button bits follow
-the Android/XInput-style mask defined in [server.py](server.py#L45-L58):
+Stick and trigger bytes are `0..255` with `128` as the neutral center. Button bits are
+defined once in [Protocol.kt](app/src/main/java/com/example/controller/Protocol.kt) and
+must match `MAP` in [server.py](server.py#L45-L58) exactly:
 
 | Bit | Button | Bit | Button |
 | --- | --- | --- | --- |
-| `0x0001` | A (✕) | `0x0100` | L1 |
-| `0x0002` | B (◯) | `0x0200` | R1 |
-| `0x0008` | X (□) | `0x1000` | D-Pad Up |
-| `0x0010` | Y (△) | `0x2000` | D-Pad Down |
-| `0x0040` | Back / Select | `0x4000` | D-Pad Left |
+| `0x0001` | A | `0x0100` | LB |
+| `0x0002` | B | `0x0200` | RB |
+| `0x0008` | X | `0x1000` | D-Pad Up |
+| `0x0010` | Y | `0x2000` | D-Pad Down |
+| `0x0040` | Back | `0x4000` | D-Pad Left |
 | `0x0080` | Start | `0x8000` | D-Pad Right |
+
+There is no bit for the Guide button — vgamepad's virtual XUSB report doesn't expose one
+(real Xbox 360 pads handle it out-of-band too), so in the app that button opens the local
+layout editor instead of sending anything over the wire.
 
 Port: `5005/udp`.
 
 ## Known issues
 
-- **Button mapping mismatch.** The Edit-mode dropdown in
-  [MainActivity.kt](app/src/main/java/com/example/controller/MainActivity.kt#L72-L76)
-  assigns different bitmasks than the server expects for `SELECT`, `START`, `L3` and `R3` —
-  `START` even collides with `Y` (`0x0010`). The default layout (D-Pad, action buttons,
-  L1/R1, sticks) is unaffected; only those four functions misbehave when assigned manually.
 - **No real connection check.** UDP has no handshake, and the app only verifies that the IP
   resolves. A valid-but-wrong address still opens the gamepad screen.
-- **Digital triggers only.** L2/R2 send `0` or `255`, never an intermediate value.
+- **Digital triggers only.** LT/RT send `0` or `255`, never an intermediate value.
+- **No L3/R3 (stick clicks) or Guide input.** The wire protocol only carries the ten bits
+  `server.py` maps to `vgamepad`; there's no thumbstick-click or Guide bit to send.
 - **Windows-only server.** `vgamepad`/ViGEmBus does not exist on Linux or macOS.
 - **No release signing config**, so `assembleRelease` produces an unsigned APK.
+- **Saved layouts don't carry forward.** The on-screen layout moved from absolute
+  coordinates to screen-fraction based ones, under a new DataStore key — a layout saved
+  with an older build of the app is ignored and the new default loads instead.
 
 ## Troubleshooting
 
 | Symptom | Cause |
 | --- | --- |
 | `[XATO] ViGEmBus drayveri topilmadi` | The ViGEmBus driver is not installed — install it and reboot |
-| Toast "IP xato!" on the phone | The address could not be resolved — check for typos |
+| Toast "Invalid address" on the phone | The IP could not be resolved — check for typos |
 | Gamepad screen opens but nothing happens on the PC | Wrong IP, blocked by the firewall, or the devices are on different networks |
 | Server never prints `Telefon ulandi` | No packets arriving — same causes as above |
 | Game does not see the controller | Start the server *before* launching the game |
