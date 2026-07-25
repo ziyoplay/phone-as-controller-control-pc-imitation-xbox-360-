@@ -84,8 +84,10 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private var controllerSocket: ControllerSocket? = null
     private lateinit var sensorManager: SensorManager
     private var accelerometer: Sensor? = null
-    private var accelX = 0f
-    private var accelY = 0f
+    // Must be Compose state, not plain vars — onSensorChanged runs outside composition,
+    // and GamepadScreen only ever sees fresh values if mutating them triggers recomposition.
+    private var accelX by mutableStateOf(0f)
+    private var accelY by mutableStateOf(0f)
     private var useAccel by mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -144,10 +146,13 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         if (event != null && useAccel) {
             // Landscape: the sensor's Y axis is forward/back tilt (stick Y), X axis is
             // left/right tilt (stick X).
-            val rawX = -event.values[1]
-            val rawY = -event.values[0]
-            accelX = rawX * 12f
-            accelY = rawY * 12f
+            val rawX = -event.values[1] * 12f
+            val rawY = -event.values[0] * 12f
+            // Raw accelerometer readings are noisy; smooth them so the stick doesn't
+            // jitter when the phone is held still.
+            val smoothing = 0.2f
+            accelX += (rawX - accelX) * smoothing
+            accelY += (rawY - accelY) * smoothing
         }
     }
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
