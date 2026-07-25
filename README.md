@@ -1,5 +1,10 @@
 # Phone as Controller — Xbox 360 Emulation
 
+> ⚠️ **Early / raw version.** This is a working prototype, not a polished release. It does
+> the job, but expect rough edges: no connection validation, no configuration UI beyond the
+> layout editor, Windows-only server, unsigned debug builds, and the known issues listed
+> [below](#known-issues). Use it, break it, report what fails.
+
 Turn an Android phone into a virtual Xbox 360 gamepad for your PC. The phone sends
 button and stick state over UDP; a small Python server on the PC feeds that state into
 the ViGEmBus driver, which exposes a real Xbox 360 controller to Windows. Games see an
@@ -109,6 +114,19 @@ the Android/XInput-style mask defined in [server.py](server.py#L45-L58):
 | `0x0080` | Start | `0x8000` | D-Pad Right |
 
 Port: `5005/udp`.
+
+## Known issues
+
+- **Button mapping mismatch.** The Edit-mode dropdown in
+  [MainActivity.kt](app/src/main/java/com/example/controller/MainActivity.kt#L72-L76)
+  assigns different bitmasks than the server expects for `SELECT`, `START`, `L3` and `R3` —
+  `START` even collides with `Y` (`0x0010`). The default layout (D-Pad, action buttons,
+  L1/R1, sticks) is unaffected; only those four functions misbehave when assigned manually.
+- **No real connection check.** UDP has no handshake, and the app only verifies that the IP
+  resolves. A valid-but-wrong address still opens the gamepad screen.
+- **Digital triggers only.** L2/R2 send `0` or `255`, never an intermediate value.
+- **Windows-only server.** `vgamepad`/ViGEmBus does not exist on Linux or macOS.
+- **No release signing config**, so `assembleRelease` produces an unsigned APK.
 
 ## Troubleshooting
 
