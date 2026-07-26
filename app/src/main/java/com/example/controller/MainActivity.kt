@@ -132,7 +132,11 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                             }
                         }
                     } else {
-                        GamepadScreen(useAccel, { useAccel = it }, accelX, accelY) { b, lx, ly, rx, ry, lt, rt ->
+                        // accelX/accelY are read via lambdas, not passed as values — reading
+                        // them here would recompose this whole screen at sensor rate (~50Hz),
+                        // redrawing every stick/button canvas each tick. The lambdas are only
+                        // invoked from inside the send-loop's coroutine, which isn't composition.
+                        GamepadScreen(useAccel, { useAccel = it }, { accelX }, { accelY }) { b, lx, ly, rx, ry, lt, rt ->
                             controllerSocket?.sendInput(b, lx, ly, rx, ry, lt, rt)
                         }
                     }
@@ -212,7 +216,7 @@ fun SetupScreen(ip: String, onIpChange: (String) -> Unit, onConnect: () -> Unit)
 }
 
 @Composable
-fun GamepadScreen(useAccel: Boolean, onToggleAccel: (Boolean) -> Unit, accelX: Float, accelY: Float, onInput: (Short, Byte, Byte, Byte, Byte, Byte, Byte) -> Unit) {
+fun GamepadScreen(useAccel: Boolean, onToggleAccel: (Boolean) -> Unit, getAccelX: () -> Float, getAccelY: () -> Float, onInput: (Short, Byte, Byte, Byte, Byte, Byte, Byte) -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val gson = Gson()
@@ -243,10 +247,14 @@ fun GamepadScreen(useAccel: Boolean, onToggleAccel: (Boolean) -> Unit, accelX: F
         buttons = if (active) (buttons.toInt() or mask).toShort() else (buttons.toInt() and mask.inv()).toShort()
     }
 
-    LaunchedEffect(useAccel, accelX, accelY, lx, ly, rx, ry, buttons, ltv, rtv) {
+    // A single long-lived loop, not re-keyed to every input change: re-launching this
+    // effect on each stick/button/sensor update was forcing a full recomposition of the
+    // screen (every canvas redrawn) on each one — a real source of jank. Reading the
+    // state fresh each tick is the standard Compose pattern for a polling side-effect.
+    LaunchedEffect(Unit) {
         while (true) {
-            val finalLx = if (useAccel) (128f + accelX).toInt().coerceIn(0, 255).toByte() else lx
-            val finalLy = if (useAccel) (128f + accelY).toInt().coerceIn(0, 255).toByte() else ly
+            val finalLx = if (useAccel) (128f + getAccelX()).toInt().coerceIn(0, 255).toByte() else lx
+            val finalLy = if (useAccel) (128f + getAccelY()).toInt().coerceIn(0, 255).toByte() else ly
             onInput(buttons, finalLx, finalLy, rx, ry, ltv, rtv)
             delay(15)
         }
